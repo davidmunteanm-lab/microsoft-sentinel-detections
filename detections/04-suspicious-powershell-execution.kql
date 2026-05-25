@@ -1,0 +1,53 @@
+// =============================================================================
+// Detection: Suspicious PowerShell Execution
+// =============================================================================
+// Author:        David-Marian Muntean
+// Severity:      High
+// MITRE Tactic:  Execution / Defense Evasion
+// MITRE Technique: T1059.001 (PowerShell) + T1027 (Obfuscated Files)
+// Data Source:   SecurityEvent (4688) or DeviceProcessEvents (Defender)
+// =============================================================================
+//
+// What it detects:
+//   PowerShell processes invoked with command-line flags or strings that are
+//   strongly associated with malicious activity:
+//     - -EncodedCommand (base64-obfuscated payload)
+//     - DownloadString / Invoke-WebRequest (remote payload fetch)
+//     - IEX / Invoke-Expression (dynamic execution)
+//     - -nop / -NoProfile, -w hidden / -WindowStyle Hidden (stealth)
+//     - -ep bypass / -ExecutionPolicy Bypass (policy bypass)
+//
+// Why it matters:
+//   PowerShell is the most-abused living-off-the-land binary on Windows.
+//   None of these flags are illegitimate on their own, but the combination
+//   "hidden window + bypass policy + encoded command + downloads code from
+//   the internet" is essentially never benign.
+// =============================================================================
+
+SecurityEvent
+| where TimeGenerated >= ago(1h)
+| where EventID == 4688
+| where Process has_any ("powershell.exe", "pwsh.exe", "powershell_ise.exe")
+| extend CmdLine = tolower(CommandLine)
+| extend 
+    HasEncodedCommand = CmdLine has_any ("-encodedcommand", "-enc ", " -e "),
+    HasDownload = CmdLine has_any ("downloadstring", "downloadfile", "invoke-webrequest", "iwr ", "wget "),
+    HasInvokeExpression = CmdLine has_any ("iex ", "invoke-expression"),
+    HasHiddenWindow = CmdLine has_any ("-windowstyle hidden", "-w hidden"),
+    HasBypass = CmdLine has_any ("-executionpolicy bypass", "-ep bypass"),
+    HasNoProfile = CmdLine has_any ("-noprofile", "-nop ")
+| extend SuspicionScore = 
+    toint(HasEncodedCommand) * 3 +
+    toint(HasDownload) * 3 +
+    toint(HasInvokeExpression) * 2 +
+    toint(HasHiddenWindow) * 2 +
+    toint(HasBypass) * 2 +
+    toint(HasNoProfile) * 1
+| where SuspicionScore >= 4
+| project 
+    TimeGenerated, Computer, Account, 
+    ParentProcessName, Process, CommandLine,
+    HasEncodedCommand, HasDownload, HasInvokeExpression,
+    HasHiddenWindow, HasBypass, HasNoProfile,
+    SuspicionScore
+| sort by SuspicionScore desc, TimeGenerated desc

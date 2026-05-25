@@ -1,0 +1,54 @@
+// =============================================================================
+// Hunting Query: Anomalous Cloud Application Usage
+// =============================================================================
+// Author:        David-Marian Muntean
+// MITRE Tactic:  Initial Access / Defense Evasion
+// MITRE Technique: T1078.004 (Cloud Accounts) + T1550 (Use Alternate Auth)
+// Data Source:   SigninLogs
+// =============================================================================
+//
+// Goal:
+//   Find sign-ins that look out of profile for the user: applications they
+//   normally don't use, sign-ins from new countries, or sign-ins outside the
+//   user's normal working hours. Useful for hunting compromised credentials
+//   that aren't yet doing anything overtly malicious.
+//
+// Approach:
+//   Compare the last 24 hours against a 30-day baseline per user. Flag any
+//   sign-in where the app, country, or device has never been seen for that
+//   user in the baseline.
+// =============================================================================
+
+let BaselineDays = 30d;
+let HuntWindow = 24h;
+let Baseline = 
+    SigninLogs
+    | where TimeGenerated between (ago(BaselineDays) .. ago(HuntWindow))
+    | where ResultType == 0
+    | summarize 
+        KnownApps = make_set(AppDisplayName),
+        KnownCountries = make_set(tostring(LocationDetails.countryOrRegion)),
+        KnownDevices = make_set(DeviceDetail.deviceId)
+        by UserPrincipalName;
+SigninLogs
+| where TimeGenerated >= ago(HuntWindow)
+| where ResultType == 0
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| extend DeviceId = tostring(DeviceDetail.deviceId)
+| join kind=leftouter Baseline on UserPrincipalName
+| extend 
+    NewApp = not(set_has_element(KnownApps, AppDisplayName)),
+    NewCountry = not(set_has_element(KnownCountries, Country)),
+    NewDevice = not(set_has_element(KnownDevices, DeviceId)) and isnotempty(DeviceId)
+| where NewApp or NewCountry or NewDevice
+| extend AnomalyReasons = pack_array(
+    iff(NewApp, strcat("First time using app: ", AppDisplayName), ""),
+    iff(NewCountry, strcat("First sign-in from: ", Country), ""),
+    iff(NewDevice, "First sign-in from this device", "")
+  )
+| project 
+    TimeGenerated, UserPrincipalName, 
+    AppDisplayName, Country, IPAddress, 
+    NewApp, NewCountry, NewDevice,
+    AnomalyReasons
+| sort by TimeGenerated desc

@@ -1,0 +1,44 @@
+// =============================================================================
+// Hunting Query: Lateral Movement via RDP
+// =============================================================================
+// Author:        David-Marian Muntean
+// MITRE Tactic:  Lateral Movement
+// MITRE Technique: T1021.001 (Remote Desktop Protocol)
+// Data Source:   SecurityEvent
+// =============================================================================
+//
+// Goal:
+//   Identify accounts that initiated RDP sessions to multiple internal hosts
+//   in a short window — a strong signature of an attacker pivoting through
+//   the network after gaining a foothold.
+//
+// How to read the result:
+//   - 3+ distinct destinations in under 1 hour from a single account is
+//     unusual outside of admin or jump-server scenarios.
+//   - Compare against the user's normal pattern (helpdesk vs. dev vs.
+//     executive) — context matters.
+//   - High-value: pivot on the source IP to find the initial compromise.
+// =============================================================================
+
+SecurityEvent
+| where TimeGenerated >= ago(4h)
+| where EventID == 4624
+| where LogonType == 10  // RemoteInteractive (RDP)
+| where AccountType == "User"
+| where Account !contains "$"  // exclude machine accounts
+| summarize 
+    DistinctDestinations = dcount(Computer),
+    Destinations = make_set(Computer, 20),
+    SessionCount = count(),
+    SourceIPs = make_set(IpAddress, 10),
+    FirstSession = min(TimeGenerated),
+    LastSession = max(TimeGenerated)
+    by Account
+| where DistinctDestinations >= 3
+| extend DurationMinutes = datetime_diff('minute', LastSession, FirstSession)
+| extend HostsPerHour = round(todouble(DistinctDestinations) / (todouble(DurationMinutes) / 60.0), 1)
+| project 
+    FirstSession, LastSession, DurationMinutes,
+    Account, DistinctDestinations, HostsPerHour,
+    SessionCount, Destinations, SourceIPs
+| sort by DistinctDestinations desc, HostsPerHour desc

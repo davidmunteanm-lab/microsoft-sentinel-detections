@@ -1,0 +1,50 @@
+// =============================================================================
+// Hunting Query: DNS Tunneling Indicators
+// =============================================================================
+// Author:        David-Marian Muntean
+// MITRE Tactic:  Command and Control / Exfiltration
+// MITRE Technique: T1071.004 (Application Layer Protocol: DNS) + T1048.003
+// Data Source:   DnsEvents
+// =============================================================================
+//
+// Goal:
+//   Find DNS queries that look like covert tunnels — abnormally long subdomain
+//   labels, very high query frequency to single domains, or unusual TXT/NULL
+//   record types. Attackers encode data into DNS labels because DNS traffic
+//   often passes egress firewalls untouched.
+//
+// How to read the result:
+//   - AvgQueryLength > 50 chars is suspicious; > 100 is rare in legitimate DNS.
+//   - Look for high entropy in subdomain labels (random-looking strings).
+//   - Single source asking thousands of queries to one domain is classic
+//     beaconing behavior.
+// =============================================================================
+
+DnsEvents
+| where TimeGenerated >= ago(24h)
+| where QueryType in ("A", "AAAA", "TXT", "NULL", "CNAME")
+| extend SubdomainLength = strlen(tostring(split(Name, ".")[0]))
+| extend ParentDomain = strcat_array(array_slice(split(Name, "."), -2, -1), ".")
+| summarize 
+    QueryCount = count(),
+    UniqueSubdomains = dcount(Name),
+    AvgQueryLength = round(avg(SubdomainLength), 1),
+    MaxQueryLength = max(SubdomainLength),
+    SampleQueries = make_set(Name, 5),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by ClientIP, ParentDomain
+| where AvgQueryLength > 30 or MaxQueryLength > 60 or UniqueSubdomains > 200
+| extend SuspicionScore = 
+    toint(AvgQueryLength > 50) * 3 +
+    toint(MaxQueryLength > 100) * 3 +
+    toint(UniqueSubdomains > 500) * 2 +
+    toint(QueryCount > 1000) * 2
+| where SuspicionScore >= 3
+| project 
+    FirstSeen, LastSeen,
+    ClientIP, ParentDomain,
+    QueryCount, UniqueSubdomains,
+    AvgQueryLength, MaxQueryLength,
+    SuspicionScore, SampleQueries
+| sort by SuspicionScore desc, AvgQueryLength desc

@@ -1,0 +1,47 @@
+// =============================================================================
+// Detection: Mass File Deletion (Ransomware / Wiper Indicator)
+// =============================================================================
+// Author:        David-Marian Muntean
+// Severity:      Critical
+// MITRE Tactic:  Impact
+// MITRE Technique: T1485 (Data Destruction) / T1486 (Data Encrypted for Impact)
+// Data Source:   DeviceFileEvents (Microsoft Defender for Endpoint)
+// =============================================================================
+//
+// What it detects:
+//   A single process deleting more than 100 files across multiple folders
+//   within a 5-minute window — a strong signal of ransomware execution or
+//   a wiper attack mid-stage.
+//
+// Why it matters:
+//   The window for response during a ransomware event is measured in minutes.
+//   This rule catches the destruction stage in time to isolate the host
+//   before the entire share is encrypted.
+//
+// Response:
+//   - Isolate the host immediately (Defender "Isolate device" action).
+//   - Identify and revoke the compromised account's tokens.
+//   - Begin restore-from-backup procedures for affected shares.
+// =============================================================================
+
+DeviceFileEvents
+| where TimeGenerated >= ago(5m)
+| where ActionType == "FileDeleted"
+| summarize 
+    DeletionCount = count(),
+    DistinctFolders = dcount(FolderPath),
+    DistinctExtensions = dcount(FileType),
+    SampleFiles = make_set(FileName, 20),
+    SampleExtensions = make_set(FileType, 20),
+    FirstDeletion = min(TimeGenerated),
+    LastDeletion = max(TimeGenerated)
+    by DeviceName, InitiatingProcessAccountName, InitiatingProcessFileName, InitiatingProcessId
+| where DeletionCount >= 100
+| where DistinctFolders >= 5
+| extend BurstSeconds = datetime_diff('second', LastDeletion, FirstDeletion)
+| project 
+    FirstDeletion, LastDeletion, BurstSeconds,
+    DeviceName, InitiatingProcessAccountName, InitiatingProcessFileName,
+    DeletionCount, DistinctFolders, DistinctExtensions,
+    SampleExtensions, SampleFiles
+| sort by DeletionCount desc

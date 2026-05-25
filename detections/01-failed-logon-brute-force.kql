@@ -1,0 +1,47 @@
+// =============================================================================
+// Detection: Failed Logon Brute Force
+// =============================================================================
+// Author:        David-Marian Muntean
+// Severity:      Medium
+// MITRE Tactic:  Credential Access
+// MITRE Technique: T1110 (Brute Force) / T1110.001 (Password Guessing)
+// Data Source:   SecurityEvent (Windows Security Event Log)
+// =============================================================================
+//
+// What it detects:
+//   A single source IP generating 10 or more failed authentication attempts
+//   (Event ID 4625) against any account within a 15-minute window.
+//
+// Why it matters:
+//   This is the classic password brute-force pattern. Even slow-and-low brute
+//   force operations eventually cross this threshold. The query groups by
+//   source IP, not user, so password-spraying against many accounts is also
+//   caught.
+//
+// Tuning notes:
+//   - Whitelist legitimate scanners or vulnerability assessment tools.
+//   - Lower the threshold to 5 for high-value assets (domain controllers,
+//     financial systems, CEO mailboxes).
+//   - Excluding NTAUTHORITY\SYSTEM and ANONYMOUS LOGON reduces noise from
+//     normal service activity.
+// =============================================================================
+
+SecurityEvent
+| where TimeGenerated >= ago(15m)
+| where EventID == 4625
+| where AccountType == "User"
+| where Account !in ("NT AUTHORITY\\SYSTEM", "NT AUTHORITY\\ANONYMOUS LOGON")
+| summarize 
+    FailedAttempts = count(),
+    DistinctUsers = dcount(Account),
+    TargetedAccounts = make_set(Account, 50),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by IpAddress, Computer
+| where FailedAttempts >= 10
+| extend DurationMinutes = datetime_diff('minute', LastSeen, FirstSeen)
+| project 
+    FirstSeen, LastSeen, DurationMinutes,
+    IpAddress, Computer, 
+    FailedAttempts, DistinctUsers, TargetedAccounts
+| sort by FailedAttempts desc

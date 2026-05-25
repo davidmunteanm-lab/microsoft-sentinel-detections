@@ -1,0 +1,46 @@
+// =============================================================================
+// Hunting Query: Rare Process Execution
+// =============================================================================
+// Author:        David-Marian Muntean
+// MITRE Tactic:  Execution / Defense Evasion
+// Data Source:   DeviceProcessEvents (Microsoft Defender for Endpoint)
+// =============================================================================
+//
+// Goal:
+//   Surface processes that have rarely (or never) been seen across the fleet.
+//   New unique binaries are often the first sign of intrusion — malware
+//   droppers, unauthorized tooling, or attacker-supplied LOLBins.
+//
+// How to read the result:
+//   - DeviceCount = 1 is the strongest signal (one-of-a-kind binary).
+//   - Pay extra attention to processes spawning from user profile paths
+//     (\Users\...\AppData\, \Downloads\, \Temp\), which is unusual for
+//     legitimate enterprise software.
+//   - Cross-reference suspicious hashes against VirusTotal before action.
+// =============================================================================
+
+DeviceProcessEvents
+| where TimeGenerated >= ago(7d)
+| where isnotempty(SHA256)
+| summarize 
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    ExecutionCount = count(),
+    DeviceCount = dcount(DeviceName),
+    Devices = make_set(DeviceName, 10),
+    Users = make_set(AccountName, 10),
+    SamplePath = any(FolderPath)
+    by FileName, SHA256
+| where DeviceCount <= 2
+| where ExecutionCount <= 5
+| extend RiskFactors = pack_array(
+    iff(SamplePath has_any ("\\appdata\\", "\\temp\\", "\\downloads\\"), "Runs from user-writable path", ""),
+    iff(FileName endswith ".scr" or FileName endswith ".pif" or FileName endswith ".hta", "Unusual executable extension", ""),
+    iff(DeviceCount == 1 and ExecutionCount == 1, "Truly unique (single execution, single device)", "")
+  )
+| project 
+    FirstSeen, LastSeen, 
+    FileName, SHA256, SamplePath,
+    DeviceCount, ExecutionCount, 
+    Devices, Users, RiskFactors
+| sort by DeviceCount asc, ExecutionCount asc

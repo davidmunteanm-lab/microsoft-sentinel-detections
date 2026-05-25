@@ -1,0 +1,62 @@
+// =============================================================================
+// Detection: Impossible Travel
+// =============================================================================
+// Author:        David-Marian Muntean
+// Severity:      High
+// MITRE Tactic:  Initial Access
+// MITRE Technique: T1078 (Valid Accounts)
+// Data Source:   SigninLogs (Microsoft Entra ID)
+// =============================================================================
+//
+// What it detects:
+//   The same user signing in from two geographically distant locations within
+//   a time window that would be physically impossible to traverse.
+//
+// Why it matters:
+//   A genuine user cannot be in Bucharest at 10:00 and in Singapore at 10:30.
+//   When this happens, either the credentials are stolen, the user is using
+//   a VPN, or there are concurrent sessions — all worth investigating.
+//
+// Tuning notes:
+//   - Build a watchlist of approved VPN egress IPs / corporate proxies and
+//     exclude them.
+//   - Frequent travelers (sales, executives) may benefit from a personalized
+//     baseline rather than the default threshold.
+// =============================================================================
+
+let LookbackPeriod = 6h;
+let MaxFeasibleSpeedKmH = 900.0;  // commercial aircraft cruise speed
+SigninLogs
+| where TimeGenerated >= ago(LookbackPeriod)
+| where ResultType == 0  // successful sign-ins only
+| where isnotempty(Location)
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| extend City = tostring(LocationDetails.city)
+| extend Latitude = todouble(LocationDetails.geoCoordinates.latitude)
+| extend Longitude = todouble(LocationDetails.geoCoordinates.longitude)
+| where isnotempty(Country) and isnotempty(Latitude)
+| project TimeGenerated, UserPrincipalName, IPAddress, Country, City, Latitude, Longitude
+| sort by UserPrincipalName asc, TimeGenerated asc
+| extend 
+    PrevTime = prev(TimeGenerated, 1),
+    PrevUser = prev(UserPrincipalName, 1),
+    PrevCountry = prev(Country, 1),
+    PrevLatitude = prev(Latitude, 1),
+    PrevLongitude = prev(Longitude, 1)
+| where UserPrincipalName == PrevUser
+| where Country != PrevCountry
+| extend DistanceKm = geo_distance_2points(Longitude, Latitude, PrevLongitude, PrevLatitude) / 1000.0
+| extend MinutesBetween = datetime_diff('minute', TimeGenerated, PrevTime)
+| where MinutesBetween > 0
+| extend RequiredSpeedKmH = (DistanceKm / MinutesBetween) * 60.0
+| where RequiredSpeedKmH > MaxFeasibleSpeedKmH
+| project 
+    PreviousSignIn = PrevTime, 
+    CurrentSignIn = TimeGenerated,
+    UserPrincipalName,
+    PreviousCountry = PrevCountry,
+    CurrentCountry = Country,
+    DistanceKm = round(DistanceKm, 0),
+    MinutesBetween,
+    RequiredSpeedKmH = round(RequiredSpeedKmH, 0)
+| sort by RequiredSpeedKmH desc

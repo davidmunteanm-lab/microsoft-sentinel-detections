@@ -1,0 +1,52 @@
+// =============================================================================
+// Detection: Successful Logon Following Brute Force
+// =============================================================================
+// Author:        David-Marian Muntean
+// Severity:      High
+// MITRE Tactic:  Credential Access / Initial Access
+// MITRE Technique: T1110 (Brute Force) — successful outcome
+// Data Source:   SecurityEvent
+// =============================================================================
+//
+// What it detects:
+//   A source IP that generates multiple failed logons followed by a successful
+//   logon to the same target within 10 minutes — the brute force succeeded.
+//
+// Why it matters:
+//   The previous rule catches attempts; this one catches breaches. A failed
+//   logon spike alone is noise. A failed-then-success sequence on the same
+//   target from the same source is a confirmed compromise pattern.
+//
+// Response:
+//   - Force-reset the compromised account credentials immediately.
+//   - Check for any post-logon activity from the compromised session.
+//   - Block the source IP at the perimeter.
+// =============================================================================
+
+let TimeWindow = 10m;
+let FailureThreshold = 5;
+let Failures = 
+    SecurityEvent
+    | where TimeGenerated >= ago(1h)
+    | where EventID == 4625
+    | project FailTime = TimeGenerated, IpAddress, Account, Computer;
+let Successes = 
+    SecurityEvent
+    | where TimeGenerated >= ago(1h)
+    | where EventID == 4624
+    | where LogonType in (2, 3, 10)  // Interactive, Network, RemoteInteractive
+    | project SuccessTime = TimeGenerated, IpAddress, Account, Computer;
+Failures
+| join kind=inner Successes on IpAddress, Account, Computer
+| where SuccessTime between (FailTime .. (FailTime + TimeWindow))
+| summarize 
+    FailedAttempts = count(),
+    FirstFailure = min(FailTime),
+    SuccessfulLogon = min(SuccessTime)
+    by IpAddress, Account, Computer
+| where FailedAttempts >= FailureThreshold
+| extend MinutesToCompromise = datetime_diff('minute', SuccessfulLogon, FirstFailure)
+| project 
+    FirstFailure, SuccessfulLogon, MinutesToCompromise,
+    IpAddress, Account, Computer, FailedAttempts
+| sort by SuccessfulLogon desc

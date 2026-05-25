@@ -1,0 +1,57 @@
+// =============================================================================
+// Detection: Suspicious Inbox Forwarding Rule Created
+// =============================================================================
+// Author:        David-Marian Muntean
+// Severity:      High
+// MITRE Tactic:  Collection / Exfiltration
+// MITRE Technique: T1114.003 (Email Collection: Email Forwarding Rule)
+// Data Source:   OfficeActivity (Exchange Audit)
+// =============================================================================
+//
+// What it detects:
+//   A mailbox rule was created that auto-forwards email to an external domain,
+//   or auto-deletes/moves messages containing keywords like "invoice",
+//   "password", "wire", "payment" — the post-compromise persistence trick
+//   used in Business Email Compromise (BEC).
+//
+// Why it matters:
+//   After taking over a mailbox, attackers create a forwarding rule so they
+//   keep getting copies of email even after the user changes their password.
+//   Rules that hide replies are designed to keep the user from noticing the
+//   ongoing fraud — "invoice rerouted to attacker, real recipient never sees
+//   it, payment goes to attacker's account."
+// =============================================================================
+
+let SuspiciousKeywords = dynamic([
+    "invoice", "payment", "wire", "transfer", "password", 
+    "credentials", "bank", "account", "confidential", "ssn"
+]);
+OfficeActivity
+| where TimeGenerated >= ago(24h)
+| where Operation in (
+    "New-InboxRule", 
+    "Set-InboxRule",
+    "UpdateInboxRules"
+  )
+| extend RuleParameters = tostring(Parameters)
+| extend ParametersLower = tolower(RuleParameters)
+| extend 
+    HasForwardToExternal = ParametersLower has_any (
+        "forwardto", "forwardasattachmentto", "redirectto"
+    ),
+    HasDelete = ParametersLower has_any ("deletemessage", "movetofolder"),
+    HasSuspiciousKeyword = ParametersLower has_any (SuspiciousKeywords),
+    HidesFromUser = ParametersLower has_any (
+        "rss feeds", "deleted items", "junk", "archive"
+    )
+| where HasForwardToExternal or (HasDelete and HasSuspiciousKeyword) or HidesFromUser
+| extend SuspicionReasons = pack_array(
+    iff(HasForwardToExternal, "Forwards to external address", ""),
+    iff(HasDelete and HasSuspiciousKeyword, "Auto-deletes messages with sensitive keywords", ""),
+    iff(HidesFromUser, "Moves matching messages to hidden folder", "")
+  )
+| project 
+    TimeGenerated, UserId, ClientIP, 
+    Operation, OfficeWorkload, 
+    SuspicionReasons, RuleParameters
+| sort by TimeGenerated desc

@@ -1,0 +1,80 @@
+// =============================================================================
+// Detection: User Added to Privileged Group
+// =============================================================================
+// Author:        David-Marian Muntean
+// Severity:      High
+// MITRE Tactic:  Privilege Escalation / Persistence
+// MITRE Technique: T1098 (Account Manipulation) + T1078.002 (Domain Accounts)
+// Data Source:   SecurityEvent + AuditLogs (Microsoft Entra ID)
+// =============================================================================
+//
+// What it detects:
+//   A user account was added to a high-privilege group, either on-premises
+//   (Domain Admins, Enterprise Admins, Schema Admins) or in the cloud
+//   (Global Administrator, Privileged Role Administrator, Security
+//   Administrator).
+//
+// Why it matters:
+//   Membership changes in tier-0 groups are extremely rare and should
+//   always be reviewed. Attackers commonly add a backdoor account to
+//   Domain Admins for long-term persistence — getting it back out usually
+//   requires forest-level recovery.
+//
+// Response:
+//   - Confirm with the change-management team that the addition was approved.
+//   - If unexpected, immediately remove the account and force-reset its 
+//     credentials.
+//   - Audit recent actions taken by the newly privileged account.
+// =============================================================================
+
+let PrivilegedGroupsOnPrem = dynamic([
+    "Domain Admins",
+    "Enterprise Admins", 
+    "Schema Admins",
+    "Administrators",
+    "Backup Operators",
+    "Account Operators",
+    "Server Operators"
+]);
+let PrivilegedRolesEntra = dynamic([
+    "Global Administrator",
+    "Privileged Role Administrator",
+    "Privileged Authentication Administrator",
+    "Security Administrator",
+    "Exchange Administrator",
+    "SharePoint Administrator",
+    "User Administrator",
+    "Conditional Access Administrator"
+]);
+// On-premises Active Directory side
+let OnPremChanges = 
+    SecurityEvent
+    | where TimeGenerated >= ago(24h)
+    | where EventID in (4728, 4732, 4756)  // group member added (global/local/universal)
+    | where TargetUserName in (PrivilegedGroupsOnPrem)
+    | project 
+        TimeGenerated, 
+        Source = "On-Prem AD",
+        ActorAccount = SubjectAccount, 
+        AddedAccount = MemberName,
+        Group = TargetUserName,
+        Computer;
+// Microsoft Entra ID side
+let EntraChanges = 
+    AuditLogs
+    | where TimeGenerated >= ago(24h)
+    | where OperationName == "Add member to role"
+    | extend TargetRole = tostring(TargetResources[0].displayName)
+    | where TargetRole in (PrivilegedRolesEntra)
+    | extend AddedAccount = tostring(TargetResources[0].userPrincipalName)
+    | extend ActorAccount = tostring(InitiatedBy.user.userPrincipalName)
+    | project 
+        TimeGenerated,
+        Source = "Microsoft Entra",
+        ActorAccount, 
+        AddedAccount,
+        Group = TargetRole,
+        Computer = "";
+OnPremChanges
+| union EntraChanges
+| sort by TimeGenerated desc

@@ -1,0 +1,49 @@
+// =============================================================================
+// Detection: MFA Fatigue / Push Bombing Attack
+// =============================================================================
+// Author:        David-Marian Muntean
+// Severity:      High
+// MITRE Tactic:  Credential Access
+// MITRE Technique: T1621 (Multi-Factor Authentication Request Generation)
+// Data Source:   SigninLogs (Microsoft Entra ID)
+// =============================================================================
+//
+// What it detects:
+//   A user receiving an unusually high number of MFA push notifications in
+//   a short window — the attacker has valid credentials and is spamming MFA
+//   prompts hoping the user approves one out of frustration or by accident.
+//
+// Why it matters:
+//   This is how high-profile breaches (Uber 2022, Cisco 2022) actually start.
+//   Once credentials are stolen via phishing, MFA push fatigue is the cheapest
+//   way to defeat the second factor.
+//
+// Response:
+//   - Force-revoke all sessions for the user (Microsoft Entra "Revoke sessions").
+//   - Force a password reset before re-enabling MFA.
+//   - Switch the user to number-matching MFA or FIDO2 keys.
+// =============================================================================
+
+let LookbackWindow = 10m;
+let FailedMfaThreshold = 5;
+SigninLogs
+| where TimeGenerated >= ago(LookbackWindow)
+| where ResultType in (50074, 50076, 50158, 500121)  // MFA-related failure codes
+| extend MfaResult = tostring(Status.additionalDetails)
+| summarize 
+    FailedMfaCount = count(),
+    DistinctIPs = dcount(IPAddress),
+    DistinctApps = dcount(AppDisplayName),
+    SourceIPs = make_set(IPAddress, 20),
+    ApplicationsTargeted = make_set(AppDisplayName, 20),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated)
+    by UserPrincipalName
+| where FailedMfaCount >= FailedMfaThreshold
+| extend BurstMinutes = datetime_diff('minute', LastAttempt, FirstAttempt) + 1
+| extend PromptsPerMinute = round(todouble(FailedMfaCount) / todouble(BurstMinutes), 2)
+| project 
+    FirstAttempt, LastAttempt, BurstMinutes,
+    UserPrincipalName, FailedMfaCount, PromptsPerMinute,
+    DistinctIPs, SourceIPs, ApplicationsTargeted
+| sort by FailedMfaCount desc
